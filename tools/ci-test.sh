@@ -33,6 +33,14 @@ case " ${modules[*]:-} " in *" e2e "*) [ -z "$run$count" ] || [ "$run$count" = 1
 root=$(git rev-parse --show-toplevel)
 cd "$root"
 command -v gh >/dev/null || { echo "ci-test: gh is required" >&2; exit 2; }
+# With ~/.config/paperboat-dev/linuxpool-gh.token and ci-fork.repo (owner/name of a fork) the run uses that account's own job limit.
+remote=origin conf=$HOME/.config/paperboat-dev
+if [ -s "$conf/ci-fork.repo" ] && [ -s "$conf/linuxpool-gh.token" ]; then
+  GH_REPO=$(cat "$conf/ci-fork.repo") GH_TOKEN=$(cat "$conf/linuxpool-gh.token")
+  remote=https://github.com/$GH_REPO.git
+  export GH_REPO GH_TOKEN GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0="credential.$remote.helper" GIT_CONFIG_VALUE_0= \
+    GIT_CONFIG_KEY_1="credential.$remote.helper" GIT_CONFIG_VALUE_1='!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f'
+fi
 workflow=$(python3 tools/device-smoke/dev_targets.py ci_workflow)
 workflow=${workflow:-test.yml}
 git cat-file -e "HEAD:.github/workflows/$workflow" 2>/dev/null ||
@@ -57,7 +65,7 @@ remove_branch() {
   local active
   active=$(active_runs "$1")
   if [ "$active" = 0 ]; then
-    git push -q --no-verify origin --delete "$1" >/dev/null 2>&1 || true
+    git push -q --no-verify "$remote" --delete "$1" >/dev/null 2>&1 || true
   else
     echo "ci-test: kept $1: its run is not finished ($active active); delete it by hand once the run ends" >&2
   fi
@@ -72,7 +80,7 @@ sweep_old_branches() {
   while read -r sha ref; do
     when=$(gh api "repos/{owner}/{repo}/commits/$sha" --jq '.commit.committer.date | fromdate' 2>/dev/null) || continue
     [ "$when" -lt "$cutoff" ] && remove_branch "${ref#refs/heads/}"
-  done < <(git ls-remote origin 'refs/heads/ci/*')
+  done < <(git ls-remote "$remote" 'refs/heads/ci/*')
 }
 sweep_old_branches || true
 
@@ -80,8 +88,8 @@ sweep_old_branches || true
 # is the only run, and it carries the module/-run inputs.
 commit=$(git commit-tree "HEAD^{tree}" -p HEAD -m "ci-test $worktree $sha [skip ci]")
 # Retry once (GitHub sometimes refuses a push for a moment) and show git's own error if it still fails.
-push_err=$(git push -q --no-verify origin "$commit:refs/heads/$branch" 2>&1) ||
-  { sleep 5; push_err=$(git push -q --no-verify origin "$commit:refs/heads/$branch" 2>&1); } ||
+push_err=$(git push -q --no-verify "$remote" "$commit:refs/heads/$branch" 2>&1) ||
+  { sleep 5; push_err=$(git push -q --no-verify "$remote" "$commit:refs/heads/$branch" 2>&1); } ||
   { echo "ci-test: could not push the ci branch $branch: $push_err" >&2; exit 1; }
 
 args=(--ref "$branch" -f "modules=${modules[*]:-}" -f "run=$run" -f "count=$count")
